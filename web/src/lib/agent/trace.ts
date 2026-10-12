@@ -102,6 +102,29 @@ export function foldTrace(rows: readonly TraceRow[]): AgentMessage[] {
     keys.push(key);
   };
 
+  // 工具调用按 tool_call_id 合并: MiniMax 的 Anthropic 兼容端点在审批通过后会把同一个
+  // tool_use 块以同一 id 重发 (Anthropic 协议要求 id 唯一), 落盘后同一 id 有两行;
+  // 重发可能跨请求 (续跑是新请求), 服务端按请求去重的集合覆盖不到. 这里在读取侧合并
+  // 并保留首条, 同时覆盖同一请求内的重发与已落盘的历史会话.
+  const upsert = (key: string | null, part: AgentPart) => {
+    if (key === null) {
+      push(key, part);
+      return;
+    }
+    const index = at(key);
+    if (index < 0) {
+      push(key, part);
+      return;
+    }
+    const prev = parts[index];
+    if (prev === undefined) {
+      push(key, part);
+      return;
+    }
+    // 已存在同 key 的块: 保留首条, 只补进首条缺失的字段 (例如后到的 result)
+    parts[index] = { ...part, ...prev };
+  };
+
   const at = (key: string) => keys.indexOf(key);
 
   const appendDelta = (key: string, kind: "text" | "reasoning", text: string) => {
@@ -136,7 +159,7 @@ export function foldTrace(rows: readonly TraceRow[]): AgentMessage[] {
 
       case "tool_call":
         // 参数只存 JSON 文本: 回执与渲染两侧都按同一份文本解析, 不必在行里再存一遍对象
-        push(toolKey(row.tool_call_id), {
+        upsert(toolKey(row.tool_call_id), {
           type: "tool-call",
           toolCallId: row.tool_call_id,
           toolName: row.name,
